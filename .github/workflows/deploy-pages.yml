@@ -1,0 +1,87 @@
+name: CI e Deploy do Semaforo Inteligente
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validar-frontend:
+    name: Lint e build do frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: semaforo-inteligente/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: semaforo-inteligente/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+        env:
+          GITHUB_PAGES: 'true'
+      - name: Configurar Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+      - name: Enviar frontend compilado
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: semaforo-inteligente/frontend/dist
+
+  testar-integracao:
+    name: Integracao MQTT, WebSocket, API e SQLite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: semaforo-inteligente/node-red
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: semaforo-inteligente/node-red/package-lock.json
+      - name: Instalar dependencias do Node-RED
+        run: npm ci
+      - name: Iniciar Node-RED com banco isolado
+        run: |
+          echo "SEMAFORO_DB=${RUNNER_TEMP}/semaforo-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.db" >> "$GITHUB_ENV"
+          nohup npm start > "$RUNNER_TEMP/node-red.log" 2>&1 &
+      - name: Executar testes de integracao
+        run: npm run test:integracao
+        env:
+          NODE_RED_URL: http://localhost:1880
+          MQTT_URL: mqtt://localhost:1883
+      - name: Mostrar logs do backend se houver falha
+        if: failure()
+        run: cat "$RUNNER_TEMP/node-red.log"
+
+  deploy:
+    name: Publicar GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: [validar-frontend, testar-integracao]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publicar
+        id: deployment
+        uses: actions/deploy-pages@v4
